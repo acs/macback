@@ -99,6 +99,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         corporate.target = self
         menu.addItem(corporate)
 
+        // Mark the entry whose wallpaper is currently on screen, so the menu
+        // shows at a glance which one is active. The check re-evaluates every
+        // time the menu opens; while a store read is in flight (rare) nothing
+        // is marked.
+        if SystemWallpaper.isWallpaperCurrent(kind: .user) {
+            user.state = .on
+        } else if SystemWallpaper.isWallpaperCurrent(kind: .corporate) {
+            corporate.state = .on
+        }
+
         menu.addItem(.separator())
 
         let settings = NSMenuItem(
