@@ -35,6 +35,8 @@ final class AppModel: ObservableObject {
 
     private let defaults: UserDefaults
     private var restoreInProgress = false
+    /// Latest kind requested while a restore is running; run right after.
+    private var pendingKind: SnapshotKind?
     private var lastAutoRestoreAt: Date?
     private var rememberingTask: Task<Void, Never>?
 
@@ -77,14 +79,24 @@ final class AppModel: ObservableObject {
     /// of macOS's wallpaper store is written back and macOS's wallpaper engine
     /// re-applies the exact choice, which can make the desktop redraw once.
     func restoreNow(kind: SnapshotKind = .user, reason: String = "manual") {
+        if restoreInProgress {
+            // A restore usually takes a couple of seconds. When the user
+            // switches quickly between the two wallpapers, don't swallow the
+            // click: queue the latest kind and run it when the current
+            // restore finishes.
+            if pendingKind != kind {
+                Log.write("Restore of \(kind.title) wallpaper queued [\(reason)]; one already in progress.")
+                pendingKind = kind
+            }
+            return
+        }
+        runRestore(kind: kind, reason: reason)
+    }
+
+    private func runRestore(kind: SnapshotKind, reason: String) {
         guard let snapshot = SystemWallpaper.loadSnapshot(kind: kind) else {
             statusText = "No \(kind.title) wallpaper remembered yet. Set it in System Settings; MacBack saves it automatically."
             Log.write("Nothing to restore yet [\(reason)]: no \(kind.title) snapshot exists.")
-            return
-        }
-
-        guard !restoreInProgress else {
-            statusText = "A wallpaper restore is already in progress."
             return
         }
 
@@ -100,27 +112,51 @@ final class AppModel: ObservableObject {
         }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            do {
-                let result = try SystemWallpaper.restoreSnapshot(kind: kind)
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.restoreInProgress = false
+            var result: SystemWallpaperRestoreResult?
+            var failure: Error?
+
+            // A fast WallpaperAgent respawn can rewrite the store right under
+            // a restore, which makes one attempt fail transiently; retrying
+            // after a short pause is enough. This mirrors what the user would
+            // otherwise do by hand.
+            let maxAttempts = 3
+            for attempt in 1...maxAttempts {
+                do {
+                    result = try SystemWallpaper.restoreSnapshot(kind: kind)
+                    failure = nil
+                    break
+                } catch {
+                    failure = error
+                    Log.write("Restore attempt \(attempt)/\(maxAttempts) failed: \(error.localizedDescription)"
+                        + (attempt < maxAttempts ? "; retrying in 2 s." : "; giving up."))
+                    if attempt < maxAttempts { Thread.sleep(forTimeInterval: 2) }
+                }
+            }
+
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.restoreInProgress = false
+                switch (result, failure) {
+                case (let result?, _):
+                    self.lastErrorText = nil
                     switch result {
                     case .restored:
                         self.finishRestore(kind: kind, name: snapshot.summary, reason: reason)
                     case .alreadyCurrent:
-                        self.lastErrorText = nil
                         self.statusText = "\(kind.title.capitalized) wallpaper \(snapshot.summary) is already showing."
                         Log.write("\(kind.title.capitalized) wallpaper '\(snapshot.summary)' already current [\(reason)]")
                     }
+                case (nil, let failure?):
+                    self.lastErrorText = failure.localizedDescription
+                    self.statusText = "Could not restore the \(kind.title) wallpaper: \(failure.localizedDescription)"
+                    Log.write("ERROR [\(reason)]: \(failure.localizedDescription)")
+                case (nil, nil):
+                    break
                 }
-            } catch {
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.restoreInProgress = false
-                    self.lastErrorText = error.localizedDescription
-                    self.statusText = "Could not restore the \(kind.title) wallpaper: \(error.localizedDescription)"
-                    Log.write("ERROR [\(reason)]: \(error.localizedDescription)")
+
+                if let pending = self.pendingKind {
+                    self.pendingKind = nil
+                    self.runRestore(kind: pending, reason: reason)
                 }
             }
         }
