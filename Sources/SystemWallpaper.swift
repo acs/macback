@@ -35,7 +35,7 @@ enum SystemWallpaperError: LocalizedError {
         case .displayNotFound:
             return "Could not identify the current display."
         case .snapshotMissing:
-            return "No wallpaper has been remembered yet. Set your personal wallpaper in System Settings; MacBack remembers it automatically."
+            return "No wallpaper of this kind is remembered yet. Show it in System Settings; MacBack saves it automatically."
         case .backupFailed(let reason):
             return "Could not back up the current wallpaper store: \(reason)"
         case .agentRestartFailed:
@@ -49,6 +49,21 @@ enum SystemWallpaperError: LocalizedError {
 enum SystemWallpaperRestoreResult {
     case restored
     case alreadyCurrent
+}
+
+/// Which wallpaper slot a snapshot belongs to. The user wallpaper is the
+/// personal one; the corporate wallpaper is the company-managed one. Both are
+/// saved automatically as the watcher sees them.
+enum SnapshotKind: String {
+    case user
+    case corporate
+
+    var title: String {
+        switch self {
+        case .user: return "user"
+        case .corporate: return "corporate"
+        }
+    }
 }
 
 /// Reads and restores `~/Library/Application Support/com.apple.wallpaper/Store/Index.plist`.
@@ -70,6 +85,10 @@ enum SystemWallpaper {
 
     // MARK: Locations
 
+    // Defaults key: set when the user deliberately restores the corporate
+    // wallpaper, which pauses auto-restore until the user wallpaper shows again.
+    static let suppressAutoRestoreDefaultsKey = "suppressAutoRestore"
+
     static var storeURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist")
@@ -82,6 +101,10 @@ enum SystemWallpaper {
 
     static var snapshotURL: URL {
         supportDirectory.appendingPathComponent("WallpaperSnapshot.plist")
+    }
+
+    static var corporateSnapshotURL: URL {
+        supportDirectory.appendingPathComponent("CorporateWallpaperSnapshot.plist")
     }
 
     private static var backupURL: URL {
@@ -108,7 +131,7 @@ enum SystemWallpaper {
         return try effectiveChoice(in: store, displayUUID: displayUUID)
     }
 
-    static func rememberCurrent(for screen: NSScreen) throws -> WallpaperSnapshot {
+    private static func rememberCurrent(for screen: NSScreen) throws -> (kind: SnapshotKind, snapshot: WallpaperSnapshot) {
         let data = try storeData()
         let store = try parseStore(data)
         guard let displayUUID = displayUUID(for: screen) else {
@@ -116,6 +139,7 @@ enum SystemWallpaper {
         }
 
         let choice = try effectiveChoice(in: store, displayUUID: displayUUID)
+        let kind: SnapshotKind = isManaged(choice) ? .corporate : .user
 
         let snapshot = WallpaperSnapshot(
             version: 1,
@@ -126,16 +150,46 @@ enum SystemWallpaper {
             configuration: choice.configuration,
             summary: choice.summary,
             imagePath: choice.imageURL?.path,
-            looksManaged: isManaged(choice)
+            looksManaged: kind == .corporate
         )
-        try save(snapshot)
-        return snapshot
+        try save(snapshot, kind: kind)
+        return (kind, snapshot)
     }
 
-    /// Saves the current wallpaper as the remembered snapshot unless it looks
-    /// company-managed or already matches the saved snapshot. Returns the new
+    /// True when the macOS store currently shows exactly the wallpaper saved in
+    /// the given slot.
+    static func isWallpaperCurrent(kind: SnapshotKind) -> Bool {
+        guard let snapshot = loadSnapshot(kind: kind),
+              let data = try? Data(contentsOf: storeURL),
+              let store = try? parseStore(data)
+        else {
+            return false
+        }
+        return matches(snapshot: snapshot, store: store)
+    }
+
+    /// True when the wallpaper currently showing is a company-managed one and
+    /// the remembered user wallpaper is different — i.e. the user wallpaper
+    /// should be restored automatically.
+    static func wallpaperNeedsRestore() -> Bool {
+        guard loadSnapshot(kind: .user) != nil else { return false }
+        guard !isWallpaperCurrent(kind: .user) else { return false }
+
+        guard let data = try? Data(contentsOf: storeURL),
+              let store = try? parseStore(data),
+              let screen = NSScreen.main ?? NSScreen.screens.first,
+              let displayUUID = displayUUID(for: screen),
+              let choice = try? effectiveChoice(in: store, displayUUID: displayUUID)
+        else {
+            return false
+        }
+        return isManaged(choice)
+    }
+
+    /// Saves the current wallpaper into its matching slot (user or corporate)
+    /// unless it already matches the snapshot that lives there. Returns the new
     /// snapshot when one was saved, nil when there was nothing to do.
-    static func rememberIfChanged(for screen: NSScreen? = nil) throws -> WallpaperSnapshot? {
+    static func rememberIfChanged(for screen: NSScreen? = nil) throws -> (kind: SnapshotKind, snapshot: WallpaperSnapshot)? {
         guard let screen = screen ?? NSScreen.main ?? NSScreen.screens.first else {
             return nil
         }
@@ -145,23 +199,25 @@ enum SystemWallpaper {
         guard let displayUUID = displayUUID(for: screen) else { return nil }
         let choice = try effectiveChoice(in: store, displayUUID: displayUUID)
 
-        // Never overwrite the personal snapshot with the corporate wallpaper.
-        if isManaged(choice) { return nil }
+        // One slot per wallpaper kind, so the corporate wallpaper can never
+        // overwrite the user snapshot and vice versa.
+        let kind: SnapshotKind = isManaged(choice) ? .corporate : .user
 
-        if let snapshot = loadSnapshot(), matches(snapshot: snapshot, store: store) {
+        if let snapshot = loadSnapshot(kind: kind), matches(snapshot: snapshot, store: store) {
             return nil
         }
 
         return try rememberCurrent(for: screen)
     }
 
-    static func loadSnapshot() -> WallpaperSnapshot? {
-        guard let data = try? Data(contentsOf: snapshotURL) else { return nil }
+    static func loadSnapshot(kind: SnapshotKind = .user) -> WallpaperSnapshot? {
+        let url = snapshotURL(for: kind)
+        guard let data = try? Data(contentsOf: url) else { return nil }
         return try? PropertyListDecoder().decode(WallpaperSnapshot.self, from: data)
     }
 
-    static func restoreSnapshot() throws -> SystemWallpaperRestoreResult {
-        guard let snapshot = loadSnapshot() else {
+    static func restoreSnapshot(kind: SnapshotKind = .user) throws -> SystemWallpaperRestoreResult {
+        guard let snapshot = loadSnapshot(kind: kind) else {
             throw SystemWallpaperError.snapshotMissing
         }
 
@@ -195,7 +251,7 @@ enum SystemWallpaper {
         }
 
         if waitForMatch(snapshot: snapshot, timeout: 10) {
-            Log.write("Restored remembered wallpaper '\(snapshot.summary)' (provider \(snapshot.provider)).")
+            Log.write("Restored \(kind.title) wallpaper '\(snapshot.summary)' (provider \(snapshot.provider)).")
             return .restored
         }
 
@@ -204,18 +260,8 @@ enum SystemWallpaper {
         // half-written store, then report the failure.
         try? currentData.write(to: storeURL, options: .atomic)
         _ = restartAgent()
-        Log.write("ERROR: macOS rejected the remembered wallpaper '\(snapshot.summary)'; rolled the store back.")
+        Log.write("ERROR: macOS rejected the \(kind.title) wallpaper '\(snapshot.summary)'; rolled the store back.")
         throw SystemWallpaperError.restoreRejected
-    }
-
-    static func matchesRememberedSnapshot() -> Bool {
-        guard let snapshot = loadSnapshot(),
-              let data = try? Data(contentsOf: storeURL),
-              let store = try? parseStore(data)
-        else {
-            return false
-        }
-        return matches(snapshot: snapshot, store: store)
     }
 
     // MARK: Store parsing
@@ -238,7 +284,11 @@ enum SystemWallpaper {
         return plist
     }
 
-    private static func save(_ snapshot: WallpaperSnapshot) throws {
+    static func snapshotURL(for kind: SnapshotKind) -> URL {
+        kind == .user ? snapshotURL : corporateSnapshotURL
+    }
+
+    private static func save(_ snapshot: WallpaperSnapshot, kind: SnapshotKind) throws {
         try FileManager.default.createDirectory(
             at: supportDirectory,
             withIntermediateDirectories: true
@@ -246,7 +296,7 @@ enum SystemWallpaper {
         let encoder = PropertyListEncoder()
         encoder.outputFormat = .binary
         let data = try encoder.encode(snapshot)
-        try data.write(to: snapshotURL, options: .atomic)
+        try data.write(to: snapshotURL(for: kind), options: .atomic)
     }
 
     private static func effectiveChoice(

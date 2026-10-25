@@ -5,6 +5,10 @@ import Foundation
 enum AppInfo {
     static let name = "MacBack"
     static let bundleID = "com.alvaro.MacBack"
+
+    static var version: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.0"
+    }
 }
 
 // MARK: - Logging
@@ -38,14 +42,6 @@ enum Log {
                 _ = try? handle.seekToEnd()
                 try? handle.write(contentsOf: data)
             }
-        }
-    }
-
-    static func reveal() {
-        if FileManager.default.fileExists(atPath: fileURL.path) {
-            NSWorkspace.shared.activateFileViewerSelecting([fileURL])
-        } else {
-            NSWorkspace.shared.open(fileURL.deletingLastPathComponent())
         }
     }
 }

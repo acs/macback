@@ -11,7 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let arguments = CommandLine.arguments
         let commandLineFlags = [
             "--install-agent", "--uninstall-agent", "--apply",
-            "--print-system-wallpaper", "--remember-current", "--restore-remembered",
+            "--print-system-wallpaper", "--restore-remembered", "--restore-corporate",
         ]
         if arguments.contains(where: commandLineFlags.contains) {
             exit(runCommandLine(arguments))
@@ -36,34 +36,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         model.refreshLaunchAtLogin()
 
         let isLoginLaunch = CommandLine.arguments.contains("--login")
-        Log.write("Started (login=\(isLoginLaunch), delay=\(model.delaySeconds)s, loginItem=\(model.launchAtLogin))")
+        Log.write("Started (login=\(isLoginLaunch), loginItem=\(model.launchAtLogin))")
 
-        if isLoginLaunch {
-            model.scheduleRestore(after: model.delaySeconds, reason: "login")
-        }
-
-        // Keep the remembered wallpaper current automatically.
+        // Keep the wallpaper snapshots current and react to company-wallpaper
+        // changes; no timing configuration anymore.
         model.startRemembering()
 
         if !model.hasRememberedWallpaper {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 SettingsWindowController.shared.show()
-            }
-        }
-
-        NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didWakeNotification,
-            object: nil,
-            queue: .main
-        ) { _ in
-            Task { @MainActor in
-                let model = AppModel.shared
-                // First make sure the snapshot tracks any change the user made
-                // before sleeping, then optionally restore.
-                model.refreshRememberedWallpaper(reason: "wake")
-                guard model.changeOnWake else { return }
-                Log.write("Woke from sleep; scheduling wallpaper restore in \(model.delaySeconds)s.")
-                model.scheduleRestore(after: model.delaySeconds, reason: "wake")
             }
         }
     }
@@ -102,55 +83,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func populate(_ menu: NSMenu) {
-        let model = AppModel.shared
-
-        let restore = NSMenuItem(
-            title: "Restore Wallpaper Now",
-            action: #selector(restoreWallpaperNow),
+        let user = NSMenuItem(
+            title: "Set User Wallpaper",
+            action: #selector(restoreUserWallpaper),
             keyEquivalent: "r"
         )
-        restore.target = self
-        menu.addItem(restore)
+        user.target = self
+        menu.addItem(user)
 
-        let remember = NSMenuItem(
-            title: "Remember Current Wallpaper",
-            action: #selector(rememberCurrentWallpaper),
+        let corporate = NSMenuItem(
+            title: "Set Corporate Wallpaper",
+            action: #selector(restoreCorporateWallpaper),
             keyEquivalent: ""
         )
-        remember.target = self
-        menu.addItem(remember)
-
-        if let remembered = model.rememberedSummary {
-            let line = NSMenuItem(
-                title: "Remembered: \(remembered)",
-                action: nil,
-                keyEquivalent: ""
-            )
-            line.isEnabled = false
-            line.indentationLevel = 1
-            menu.addItem(line)
-        }
-
-        if let name = model.lastRestoreName, let date = model.lastRestoreAt {
-            let last = NSMenuItem(
-                title: "Last restore: \(name), \(date.formatted(date: .omitted, time: .shortened))",
-                action: nil,
-                keyEquivalent: ""
-            )
-            last.isEnabled = false
-            last.indentationLevel = 1
-            menu.addItem(last)
-        }
+        corporate.target = self
+        menu.addItem(corporate)
 
         menu.addItem(.separator())
-
-        let wallpaperSettings = NSMenuItem(
-            title: "Open Wallpaper Settings…",
-            action: #selector(openWallpaperSettings),
-            keyEquivalent: ""
-        )
-        wallpaperSettings.target = self
-        menu.addItem(wallpaperSettings)
 
         let settings = NSMenuItem(
             title: "Settings…",
@@ -160,10 +109,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         settings.target = self
         menu.addItem(settings)
 
-        let log = NSMenuItem(title: "Open Log", action: #selector(openLog), keyEquivalent: "")
-        log.target = self
-        menu.addItem(log)
-
         menu.addItem(.separator())
 
         menu.addItem(NSMenuItem(
@@ -171,28 +116,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             action: #selector(NSApplication.terminate(_:)),
             keyEquivalent: "q"
         ))
+
+        let about = NSMenuItem(
+            title: "About MacBack",
+            action: #selector(showAbout),
+            keyEquivalent: ""
+        )
+        about.target = self
+        menu.addItem(about)
     }
 
     // MARK: Actions
 
-    @objc private func restoreWallpaperNow() {
-        AppModel.shared.restoreNow(reason: "menu")
+    @objc private func restoreUserWallpaper() {
+        AppModel.shared.restoreNow(kind: .user, reason: "menu")
     }
 
-    @objc private func rememberCurrentWallpaper() {
-        AppModel.shared.rememberCurrentNow()
+    @objc private func restoreCorporateWallpaper() {
+        AppModel.shared.restoreNow(kind: .corporate, reason: "menu")
     }
 
     @objc private func showSettings() {
         SettingsWindowController.shared.show()
     }
 
-    @objc private func openWallpaperSettings() {
-        AppModel.shared.openWallpaperSettings()
-    }
-
-    @objc private func openLog() {
-        Log.reveal()
+    /// Shows the small About window: menu-bar symbol, version, a one-line
+    /// description and the open-source project link.
+    @objc private func showAbout() {
+        AboutWindowController.shared.show()
     }
 
     // MARK: Main menu
@@ -244,37 +195,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return 0
         }
 
-        if arguments.contains("--remember-current") {
-            guard let screen = NSScreen.main ?? NSScreen.screens.first else {
-                print("error: no display is available.")
-                return 1
-            }
-            do {
-                let snapshot = try SystemWallpaper.rememberCurrent(for: screen)
-                print("Remembered \(snapshot.summary) (provider \(snapshot.provider))")
-                if snapshot.looksManaged {
-                    print("warning: this looks like a company-managed wallpaper.")
-                }
-                return 0
-            } catch {
-                print("error: \(error.localizedDescription)")
-                return 1
-            }
-        }
-
-        // --restore-remembered and --apply both restore synchronously: the CLI
-        // process must not exit before the wallpaper store is committed.
-        if arguments.contains("--restore-remembered") || arguments.contains("--apply") {
-            guard let snapshot = SystemWallpaper.loadSnapshot() else {
+        // --restore-remembered / --apply restore the user wallpaper; they are
+        // synchronous because the CLI process must not exit before the
+        // wallpaper store is committed.
+        if arguments.contains("--apply") || arguments.contains("--restore-remembered")
+            || arguments.contains("--restore-corporate") {
+            let kind: SnapshotKind = arguments.contains("--restore-corporate") ? .corporate : .user
+            guard let snapshot = SystemWallpaper.loadSnapshot(kind: kind) else {
                 print("error: \(SystemWallpaperError.snapshotMissing.localizedDescription)")
                 return 1
             }
+            if kind == .corporate {
+                // Pause auto-restore until the user wallpaper shows again, same
+                // as a menu restore would.
+                UserDefaults.standard.set(true, forKey: SystemWallpaper.suppressAutoRestoreDefaultsKey)
+            }
             do {
-                switch try SystemWallpaper.restoreSnapshot() {
+                switch try SystemWallpaper.restoreSnapshot(kind: kind) {
                 case .restored:
-                    print("Restored \(snapshot.summary).")
+                    print("Restored \(kind.title) wallpaper \(snapshot.summary).")
                 case .alreadyCurrent:
-                    print("\(snapshot.summary) is already current.")
+                    print("\(kind.title.capitalized) wallpaper \(snapshot.summary) is already current.")
                 }
                 return 0
             } catch {
@@ -291,7 +232,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             do {
                 try LaunchAgent.install(executable: executable, runningFromAgent: false)
                 print("Installed login item at \(LaunchAgent.plistURL.path)")
-                print("MacBack will start at login and restore the wallpaper after \(AppModel.shared.delaySeconds) s.")
+                print("MacBack will start at login and keep your wallpaper in place.")
                 return 0
             } catch {
                 print("error: \(error.localizedDescription)")

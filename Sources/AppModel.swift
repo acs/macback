@@ -7,14 +7,6 @@ final class AppModel: ObservableObject {
 
     // MARK: Settings
 
-    @Published var delaySeconds: Int {
-        didSet { defaults.set(delaySeconds, forKey: Keys.delaySeconds) }
-    }
-
-    @Published var changeOnWake: Bool {
-        didSet { defaults.set(changeOnWake, forKey: Keys.changeOnWake) }
-    }
-
     @Published private(set) var launchAtLogin: Bool
     @Published private(set) var statusText: String = "Ready."
     @Published private(set) var lastRestoreAt: Date?
@@ -22,54 +14,72 @@ final class AppModel: ObservableObject {
     @Published private(set) var lastErrorText: String?
     @Published private(set) var rememberedSummary: String?
     @Published private(set) var rememberedCapturedAt: Date?
+    @Published private(set) var corporateSummary: String?
+    @Published private(set) var corporateCapturedAt: Date?
 
     // MARK: State
 
     private enum Keys {
-        static let delaySeconds = "delaySeconds"
-        static let changeOnWake = "changeOnWake"
         static let lastRestoreAt = "lastRestoreAt"
         static let lastRestoreName = "lastRestoreName"
         // Keys written by earlier versions, read for a smooth upgrade.
         static let legacyLastAppliedAt = "lastAppliedAt"
         static let legacyLastAppliedName = "lastAppliedName"
+        static let legacyDelaySeconds = "delaySeconds"
+        static let legacyChangeOnWake = "changeOnWake"
     }
 
+    /// Minimum time between two automatic restores, so an aggressive corporate
+    /// policy cannot make MacBack restart the wallpaper engine in a tight loop.
+    static let autoRestoreCooldown: TimeInterval = 60
+
     private let defaults: UserDefaults
-    private var pendingRestore: Task<Void, Never>?
     private var restoreInProgress = false
+    private var lastAutoRestoreAt: Date?
     private var rememberingTask: Task<Void, Never>?
+
+    /// Set when the user deliberately restores the corporate wallpaper; the
+    /// watcher stops auto-restoring until the user wallpaper is showing again.
+    private var suppressAutoRestore: Bool {
+        get { defaults.bool(forKey: SystemWallpaper.suppressAutoRestoreDefaultsKey) }
+        set { defaults.set(newValue, forKey: SystemWallpaper.suppressAutoRestoreDefaultsKey) }
+    }
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
 
-        delaySeconds = Self.intValue(defaults, Keys.delaySeconds, fallback: 30)
-        changeOnWake = Self.boolValue(defaults, Keys.changeOnWake, fallback: false)
         launchAtLogin = LaunchAgent.isInstalled
         lastRestoreAt = (defaults.object(forKey: Keys.lastRestoreAt) as? Date)
             ?? (defaults.object(forKey: Keys.legacyLastAppliedAt) as? Date)
         lastRestoreName = defaults.string(forKey: Keys.lastRestoreName)
             ?? defaults.string(forKey: Keys.legacyLastAppliedName)
 
-        let snapshot = SystemWallpaper.loadSnapshot()
+        // Timing settings are gone; reactive watching replaced them.
+        defaults.removeObject(forKey: Keys.legacyDelaySeconds)
+        defaults.removeObject(forKey: Keys.legacyChangeOnWake)
+
+        let snapshot = SystemWallpaper.loadSnapshot(kind: .user)
         rememberedSummary = snapshot?.summary
         rememberedCapturedAt = snapshot?.capturedAt
+        let corporate = SystemWallpaper.loadSnapshot(kind: .corporate)
+        corporateSummary = corporate?.summary
+        corporateCapturedAt = corporate?.capturedAt
     }
 
     var hasRememberedWallpaper: Bool {
-        SystemWallpaper.loadSnapshot() != nil
+        SystemWallpaper.loadSnapshot(kind: .user) != nil
     }
 
     // MARK: Restoring
 
-    /// Restores the remembered wallpaper now. Works for still images, dynamic
-    /// wallpapers and aerial videos alike: the saved copy of macOS's wallpaper
-    /// store is written back and macOS's wallpaper engine re-applies the exact
-    /// choice, which can make the desktop redraw once.
-    func restoreNow(reason: String = "manual") {
-        guard let snapshot = SystemWallpaper.loadSnapshot() else {
-            statusText = "No wallpaper remembered yet. Set your wallpaper in System Settings; MacBack will pick it up automatically."
-            Log.write("Nothing to restore yet [\(reason)]: no snapshot exists.")
+    /// Restores the remembered wallpaper of the given kind now. Works for
+    /// still images, dynamic wallpapers and aerial videos alike: the saved copy
+    /// of macOS's wallpaper store is written back and macOS's wallpaper engine
+    /// re-applies the exact choice, which can make the desktop redraw once.
+    func restoreNow(kind: SnapshotKind = .user, reason: String = "manual") {
+        guard let snapshot = SystemWallpaper.loadSnapshot(kind: kind) else {
+            statusText = "No \(kind.title) wallpaper remembered yet. Set it in System Settings; MacBack saves it automatically."
+            Log.write("Nothing to restore yet [\(reason)]: no \(kind.title) snapshot exists.")
             return
         }
 
@@ -79,22 +89,29 @@ final class AppModel: ObservableObject {
         }
 
         restoreInProgress = true
-        statusText = "Restoring \(snapshot.summary)…"
-        Log.write("Restoring wallpaper '\(snapshot.summary)' (provider \(snapshot.provider)) [\(reason)]")
+        statusText = "Restoring \(kind.title) wallpaper \(snapshot.summary)…"
+        Log.write("Restoring \(kind.title) wallpaper '\(snapshot.summary)' (provider \(snapshot.provider)) [\(reason)]")
+
+        if kind == .corporate {
+            // The user asked for the corporate wallpaper on purpose; the
+            // watcher must not undo that until the user wallpaper shows again.
+            suppressAutoRestore = true
+            Log.write("Paused automatic restore until the user wallpaper is showing again.")
+        }
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             do {
-                let result = try SystemWallpaper.restoreSnapshot()
+                let result = try SystemWallpaper.restoreSnapshot(kind: kind)
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.restoreInProgress = false
                     switch result {
                     case .restored:
-                        self.finishRestore(name: snapshot.summary, reason: reason)
+                        self.finishRestore(kind: kind, name: snapshot.summary, reason: reason)
                     case .alreadyCurrent:
                         self.lastErrorText = nil
-                        self.statusText = "\(snapshot.summary) is already showing."
-                        Log.write("Remembered wallpaper '\(snapshot.summary)' already current [\(reason)]")
+                        self.statusText = "\(kind.title.capitalized) wallpaper \(snapshot.summary) is already showing."
+                        Log.write("\(kind.title.capitalized) wallpaper '\(snapshot.summary)' already current [\(reason)]")
                     }
                 }
             } catch {
@@ -102,52 +119,54 @@ final class AppModel: ObservableObject {
                     guard let self else { return }
                     self.restoreInProgress = false
                     self.lastErrorText = error.localizedDescription
-                    self.statusText = "Could not restore the wallpaper: \(error.localizedDescription)"
+                    self.statusText = "Could not restore the \(kind.title) wallpaper: \(error.localizedDescription)"
                     Log.write("ERROR [\(reason)]: \(error.localizedDescription)")
                 }
             }
         }
     }
 
-    private func finishRestore(name: String, reason: String) {
+    private func finishRestore(kind: SnapshotKind, name: String, reason: String) {
         let now = Date()
         lastRestoreAt = now
         lastRestoreName = name
         lastErrorText = nil
-        statusText = "Restored \(name)."
+        statusText = "Restored \(kind.title) wallpaper \(name)."
         defaults.set(now, forKey: Keys.lastRestoreAt)
         defaults.set(name, forKey: Keys.lastRestoreName)
-        Log.write("Restored wallpaper '\(name)' [\(reason)]")
+        Log.write("Restored \(kind.title) wallpaper '\(name)' [\(reason)]")
     }
 
-    /// Schedules a restore after `seconds`. Cancels any pending restore first.
-    func scheduleRestore(after seconds: Int, reason: String) {
-        pendingRestore?.cancel()
-
-        let delay = min(max(0, seconds), 7 * 24 * 60 * 60)
-        if delay > 0 {
-            statusText = "Restore scheduled in \(Self.durationText(delay)) (\(reason))."
-        } else {
-            statusText = "Restoring wallpaper now (\(reason))."
+    /// Restores the saved user wallpaper if the company wallpaper is showing.
+    /// Runs at most once per cooldown period and pauses while the user has
+    /// deliberately chosen the corporate wallpaper.
+    private func maybeAutoRestore(reason: String) {
+        guard !restoreInProgress else { return }
+        guard !suppressAutoRestore else { return }
+        if let last = lastAutoRestoreAt,
+           Date().timeIntervalSince(last) < Self.autoRestoreCooldown {
+            return
         }
-        Log.write("Scheduling wallpaper restore in \(delay)s [\(reason)]")
 
-        pendingRestore = Task { [weak self] in
-            if delay > 0 {
-                try? await Task.sleep(nanoseconds: UInt64(delay) * 1_000_000_000)
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let needed = SystemWallpaper.wallpaperNeedsRestore()
+            DispatchQueue.main.async { [weak self] in
+                guard needed, let self else { return }
+                Log.write("Company wallpaper detected; restoring the user wallpaper.")
+                self.lastAutoRestoreAt = Date()
+                self.restoreNow(kind: .user, reason: reason)
             }
-            guard !Task.isCancelled else { return }
-            self?.restoreNow(reason: reason)
         }
     }
 
-    // MARK: Automatic remembering
+    // MARK: Automatic watching
 
-    /// Watches the wallpaper for MacBack's whole lifetime and automatically
-    /// remembers the current wallpaper while it does not look company-managed.
-    /// This keeps the snapshot current with no manual step: whenever a personal
-    /// wallpaper is set in System Settings, MacBack picks it up within seconds
-    /// and that is the wallpaper it restores after login.
+    /// Watches the wallpaper for MacBack's whole lifetime. Each tick:
+    /// - remembers the current wallpaper into its matching slot (user or
+    ///   corporate), and
+    /// - restores the user wallpaper whenever the company wallpaper is showing,
+    ///   unless the user deliberately chose it (suppressed) or a restore just
+    ///   happened (cooldown).
     func startRemembering() {
         guard rememberingTask == nil else { return }
 
@@ -158,13 +177,30 @@ final class AppModel: ObservableObject {
             try? await Task.sleep(nanoseconds: 3_000_000_000)
             while !Task.isCancelled {
                 self?.refreshRememberedWallpaper(reason: "automatic")
+                self?.maybeAutoRestore(reason: "automatic")
+                self?.rearmSuppressionIfNeeded()
                 try? await Task.sleep(nanoseconds: 10_000_000_000)
             }
         }
     }
 
-    /// Looks at the current wallpaper. If it is not company-managed and differs
-    /// from the remembered snapshot, saves it as the new snapshot.
+    /// Clears the deliberate-corporate suppression once the user wallpaper is
+    /// showing again.
+    private func rearmSuppressionIfNeeded() {
+        guard suppressAutoRestore else { return }
+
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let userWallpaperShowing = SystemWallpaper.isWallpaperCurrent(kind: .user)
+            DispatchQueue.main.async {
+                guard let self, userWallpaperShowing, self.suppressAutoRestore else { return }
+                self.suppressAutoRestore = false
+                Log.write("User wallpaper is showing again; automatic restore re-armed.")
+            }
+        }
+    }
+
+    /// Looks at the current wallpaper. If it differs from the snapshot in its
+    /// matching slot (user or corporate), saves it there.
     func refreshRememberedWallpaper(reason: String) {
         guard !restoreInProgress else { return }
 
@@ -173,12 +209,10 @@ final class AppModel: ObservableObject {
                 let changed = try SystemWallpaper.rememberIfChanged()
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    guard let snapshot = changed else { return }
-                    self.rememberedSummary = snapshot.summary
-                    self.rememberedCapturedAt = snapshot.capturedAt
-                    self.lastErrorText = nil
-                    self.statusText = "Remembered \(snapshot.summary)."
-                    Log.write("Remembered wallpaper '\(snapshot.summary)' (provider \(snapshot.provider)) [\(reason)]")
+                    guard let change = changed else { return }
+                    self.applyRememberedChange(kind: change.kind, snapshot: change.snapshot)
+                    self.statusText = "Remembered \(change.kind.title) wallpaper \(change.snapshot.summary)."
+                    Log.write("Remembered \(change.kind.title) wallpaper '\(change.snapshot.summary)' (provider \(change.snapshot.provider)) [\(reason)]")
                 }
             } catch {
                 // Transient failures (a store that is momentarily being
@@ -192,31 +226,16 @@ final class AppModel: ObservableObject {
         }
     }
 
-    /// Manually snaps the current wallpaper as the remembered snapshot, even if
-    /// it looks company-managed (for testing or as an escape hatch).
-    func rememberCurrentNow() {
-        guard let screen = NSScreen.main ?? NSScreen.screens.first else {
-            statusText = "No display is available right now."
-            return
-        }
-
-        do {
-            let snapshot = try SystemWallpaper.rememberCurrent(for: screen)
+    private func applyRememberedChange(kind: SnapshotKind, snapshot: WallpaperSnapshot) {
+        switch kind {
+        case .user:
             rememberedSummary = snapshot.summary
             rememberedCapturedAt = snapshot.capturedAt
-            lastErrorText = nil
-            if snapshot.looksManaged {
-                statusText = "Remembered \(snapshot.summary). This looks company-managed; set a personal wallpaper instead."
-                Log.write("WARNING: Remembered wallpaper looks company-managed: \(snapshot.summary) (provider \(snapshot.provider))")
-            } else {
-                statusText = "Remembered \(snapshot.summary)."
-                Log.write("Remembered wallpaper '\(snapshot.summary)' (provider \(snapshot.provider)) [manual]")
-            }
-        } catch {
-            lastErrorText = error.localizedDescription
-            statusText = "Could not remember the wallpaper: \(error.localizedDescription)"
-            Log.write("ERROR remembering wallpaper: \(error.localizedDescription)")
+        case .corporate:
+            corporateSummary = snapshot.summary
+            corporateCapturedAt = snapshot.capturedAt
         }
+        lastErrorText = nil
     }
 
     // MARK: Login item
@@ -233,7 +252,7 @@ final class AppModel: ObservableObject {
                     throw LaunchAgentError.missingExecutable
                 }
                 try LaunchAgent.install(executable: executable, runningFromAgent: runningFromAgent)
-                statusText = "MacBack will start at login and restore the wallpaper after \(Self.durationText(delaySeconds))."
+                statusText = "MacBack will start at login and keep your wallpaper in place."
             } else {
                 try LaunchAgent.uninstall(runningFromAgent: runningFromAgent)
                 statusText = "MacBack will no longer start at login."
@@ -260,28 +279,5 @@ final class AppModel: ObservableObject {
 
         NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/System Settings.app"))
         Log.write("Opened System Settings (Wallpaper deep link unavailable).")
-    }
-
-    // MARK: Helpers
-
-    static func durationText(_ seconds: Int) -> String {
-        if seconds <= 0 { return "0 s" }
-        let hours = seconds / 3600
-        let minutes = (seconds % 3600) / 60
-        let secs = seconds % 60
-
-        var parts: [String] = []
-        if hours > 0 { parts.append("\(hours) h") }
-        if minutes > 0 { parts.append("\(minutes) min") }
-        if secs > 0, hours == 0 { parts.append("\(secs) s") }
-        return parts.isEmpty ? "0 s" : parts.joined(separator: " ")
-    }
-
-    private static func intValue(_ defaults: UserDefaults, _ key: String, fallback: Int) -> Int {
-        defaults.object(forKey: key) == nil ? fallback : defaults.integer(forKey: key)
-    }
-
-    private static func boolValue(_ defaults: UserDefaults, _ key: String, fallback: Bool) -> Bool {
-        defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key)
     }
 }

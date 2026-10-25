@@ -20,9 +20,9 @@ cat > "$STAGE/Read Me.txt" <<'EOF'
 MacBack
 =======
 
-A menu-bar app that remembers your personal wallpaper and restores it
-automatically after your company replaces it (a configurable number of seconds
-after login, and optionally after waking from sleep).
+A menu-bar app that remembers your personal wallpaper and puts it back
+automatically whenever your company's wallpaper shows up (at login, after
+waking, or any other time).
 
 Install
 -------
@@ -35,20 +35,23 @@ Install
 3. In System Settings > Wallpaper, pick your personal wallpaper (a still image,
    a dynamic wallpaper or an aerial video). MacBack remembers it automatically
    within a few seconds — there is nothing to configure in the app.
-4. Click the arrow icon in the menu bar and choose Settings…:
-   - Set the delay. Make it long enough for the corporate policy to finish
-     (30–60 seconds is a good start).
-   - Switch on "Start MacBack at login".
+4. Click the arrow icon in the menu bar:
+   - "Set User Wallpaper" restores your personal wallpaper; "Set Corporate
+     Wallpaper" restores the company one. Both are saved automatically while
+     they are active, so both menu entries work out of the box.
+   - In Settings… switch on "Start MacBack at login" and use
+     "Open Wallpaper Settings…" if you want to change your wallpaper. That is
+     all the settings there are — watching and restoring are automatic.
 5. Move MacBack into Applications BEFORE enabling "Start MacBack at login":
    the login item remembers the app's current location.
 
-After login, MacBack waits for the delay and restores your wallpaper. Whenever
-it is running, MacBack keeps re-reading your wallpaper as you change it, so the
-remembered one is always your latest personal choice. Company wallpapers
-(Hexnode/MDM paths) are detected and never remembered over your own.
+MacBack reacts to what macOS actually shows: as soon as the company wallpaper
+appears (at login or any other time), it puts your wallpaper back, within a few
+seconds. Company wallpapers (Hexnode/MDM paths) are saved into their own slot,
+never over your own.
 
 If the corporate wallpaper comes back while you are working, choose
-"Restore Wallpaper Now" from the menu-bar menu.
+"Set User Wallpaper" from the menu-bar menu.
 
 Requires macOS 14 or later. Universal binary (Apple silicon and Intel).
 
@@ -57,7 +60,8 @@ Notes
 
 - Preferences: com.alvaro.MacBack
 - Log: ~/Library/Logs/MacBack.log
-- Remembered snapshot: ~/Library/Application Support/MacBack/WallpaperSnapshot.plist
+- Remembered user snapshot: ~/Library/Application Support/MacBack/WallpaperSnapshot.plist
+- Remembered corporate snapshot: ~/Library/Application Support/MacBack/CorporateWallpaperSnapshot.plist
 - Restoring writes macOS's wallpaper store back and restarts its wallpaper
   engine; the desktop may redraw once.
 - If an MDM profile continuously re-applies the corporate wallpaper, the

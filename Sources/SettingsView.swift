@@ -14,80 +14,59 @@ struct SettingsView: View {
     var body: some View {
         Form {
             Section {
-                LabeledContent("Delay after login") {
-                    HStack(spacing: 8) {
-                        TextField("Seconds", value: $model.delaySeconds, format: .number)
-                            .labelsHidden()
-                            .multilineTextAlignment(.trailing)
-                            .frame(width: 76)
-                        Text("seconds")
-                            .foregroundStyle(.secondary)
-                        Stepper(
-                            "Delay",
-                            value: $model.delaySeconds,
-                            in: 0...86_400,
-                            step: 5
-                        )
-                        .labelsHidden()
-                    }
-                }
+                Toggle("Start MacBack at login", isOn: launchBinding)
 
-                Text("MacBack waits \(AppModel.durationText(model.delaySeconds)) after you log in, then restores your wallpaper. This is the earliest point macOS lets an app touch your desktop.")
+                Text("MacBack watches the wallpaper continuously and puts your wallpaper back whenever the company wallpaper shows up — at login, after waking, or any other time. There is nothing to configure: pointing macOS at your wallpaper is all it needs.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-
-                Toggle("Restore again after waking from sleep", isOn: $model.changeOnWake)
-                Toggle("Start MacBack at login", isOn: launchBinding)
             } header: {
-                Text("Timing")
+                Text("Startup")
             }
 
             Section {
-                LabeledContent("Remembered wallpaper") {
+                LabeledContent("User wallpaper") {
                     Text(model.rememberedSummary ?? "None yet")
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
 
                 if let date = model.rememberedCapturedAt {
-                    LabeledContent("Captured") {
+                    LabeledContent("User captured") {
                         Text(date.formatted(date: .abbreviated, time: .shortened))
                             .foregroundStyle(.secondary)
                     }
                 }
 
-                Text("Your wallpaper is remembered automatically while it is active and does not look company-managed — no button needed. Set your wallpaper in System Settings; MacBack notices it within seconds and restores it after login.")
+                LabeledContent("Corporate wallpaper") {
+                    Text(model.corporateSummary ?? "None yet")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                if let date = model.corporateCapturedAt {
+                    LabeledContent("Corporate captured") {
+                        Text(date.formatted(date: .abbreviated, time: .shortened))
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Text("Both kinds are remembered automatically while they are active — no button needed. Set your wallpaper in System Settings; MacBack notices it within seconds. Company wallpapers are saved separately, so you can switch between them from the menu.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            } header: {
+                Text("Status")
+            }
 
-                HStack(spacing: 12) {
-                    Button("Restore Wallpaper Now") {
-                        model.restoreNow(reason: "manual")
-                    }
-                    .keyboardShortcut("r")
-
-                    Button("Remember Current Wallpaper") {
-                        model.rememberCurrentNow()
-                    }
-
+            Section {
+                HStack {
+                    Spacer()
                     Button("Open Wallpaper Settings…") {
                         model.openWallpaperSettings()
                     }
+                    Spacer()
                 }
-
-                Text(model.statusText)
-                    .font(.callout)
-                    .foregroundStyle(model.lastErrorText == nil ? Color.secondary : Color.red)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Button("Reveal Log") {
-                    Log.reveal()
-                }
-                .buttonStyle(.link)
-            } header: {
-                Text("Status")
             }
         }
         .formStyle(.grouped)
