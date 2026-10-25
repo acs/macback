@@ -19,7 +19,7 @@ struct AboutView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("MacBack remembers your personal wallpaper and the company wallpaper and shows the one configured by you.")
+            Text("A tiny macOS menu-bar app that remembers your personal wallpaper and puts it back automatically whenever your company's wallpaper shows up — at login, after waking from sleep, or at any other moment, within seconds.")
                 .font(.callout)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
