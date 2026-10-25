@@ -37,6 +37,7 @@ rm -f "${SLICES[@]}"
 
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
+cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 
 echo "==> Signing (ad-hoc)"
 codesign --force --sign - --identifier "com.alvaro.MacBack" "$APP" >/dev/null
