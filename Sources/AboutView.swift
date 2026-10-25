@@ -25,14 +25,10 @@ struct AboutView: View {
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: 320)
 
-            Text("Released as open source.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             Button {
                 NSWorkspace.shared.open(URL(string: "https://github.com/acs/macback")!)
             } label: {
-                Text("Find the Open Source project: github.com/acs/macback")
+                Text("Released as Open Source")
             }
             .buttonStyle(.link)
         }
