@@ -4,8 +4,6 @@ A tiny macOS menu-bar app that remembers your personal wallpaper and puts it
 back automatically whenever your company's wallpaper shows up — at login,
 after waking from sleep, or at any other moment, within seconds.
 
-Open source, MIT licensed: <https://github.com/acs/macback>
-
 ## Install from releases
 
 1. Download the latest [release](https://github.com/acs/macback/releases/latest)
